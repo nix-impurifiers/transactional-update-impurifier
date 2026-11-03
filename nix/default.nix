@@ -39,6 +39,13 @@ let
     text = ''exec ${sdk}/python/bin/python3 ${../src}/cli.py "$@"'';
   };
   safe = value: builtins.match "[A-Za-z0-9_][A-Za-z0-9_.+-]*" value != null;
+  makeNativeDeployment =
+    { name, payload }:
+    assert lib.assertMsg (safe name) "invalid deployment name";
+    pkgs.runCommand "${name}-native-transactional-tree" { } ''
+      mkdir -p $out/rootfs
+      cp -r ${payload}/. $out/rootfs/
+    '';
   makeDeployment =
     {
       pkg,
@@ -46,8 +53,23 @@ let
       program ? pkg.meta.mainProgram or pkg.pname,
       offline ? false,
       hardware ? null,
+      bundledNixStore ? null,
+      bundledNixNotices ? [ ],
     }:
     assert lib.assertMsg (safe name && safe program) "invalid application or executable name";
+    let
+      appSdk =
+        if bundledNixStore == null then
+          sdk
+        else
+          pkgs.linkFarm "transactional-update-python-sdk" [
+            {
+              name = "python";
+              path = pkgs.python3;
+            }
+          ];
+      bundle = core.makeRuntimeTree { inherit bundledNixStore bundledNixNotices; };
+    in
     pkgs.runCommand "${name}-${pkg.version}-transactional-deployment"
       {
         __structuredAttrs = true;
@@ -61,6 +83,11 @@ let
         cp ${../src/common.py} "$implementation/common.py"
         cp ${coreSrc}/src/engine.py "$implementation/engine.py"
         cp ${../LICENSE} "$implementation/LICENSE"
+        ${lib.optionalString (bundledNixStore != null) ''
+          cp ${bundle}/usr/lib/transactional-update-impurifier/nix-store "$implementation/nix-store"
+          mkdir -p "$implementation/share/licenses/bundled-nix"
+          cp -r ${bundle}/usr/share/licenses/transactional-update-impurifier/bundled-nix/. "$implementation/share/licenses/bundled-nix/"
+        ''}
         cp ${
           pkgs.writeText "deployment.json" (
             builtins.toJSON {
@@ -75,7 +102,7 @@ let
               inherit name program offline;
               inherit (pkg) version;
               installable = toString pkg;
-              sdk = toString sdk;
+              sdk = toString appSdk;
               nixBin = "${pkgs.nix}/bin";
               implementationDigest =
                 builtins.hashFile "sha256" ../src/launch.py
@@ -96,7 +123,7 @@ let
         chmod 755 $out/rootfs/usr/bin/${program}
         ${lib.optionalString offline ''
           cp -r ${core.offlineCache pkg} "$implementation/cache"
-          cp -r ${core.offlineCache sdk} "$implementation/sdk-cache"
+          cp -r ${core.offlineCache appSdk} "$implementation/sdk-cache"
         ''}
       '';
 in
@@ -107,6 +134,7 @@ in
     nativeClient
     sdk
     makeDeployment
+    makeNativeDeployment
     ;
   makeNetDeployment = args: makeDeployment (args // { offline = false; });
   makeOfflineDeployment = args: makeDeployment (args // { offline = true; });

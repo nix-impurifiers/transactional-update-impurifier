@@ -23,9 +23,18 @@
       formatter = pkgs.nixfmt-tree;
       packages.default = impurifier.package;
       packages.native-client = impurifier.nativeClient;
-      checks = import ../../../tests {
-        inherit pkgs impurifier;
-        coreSrc = inputs.impurifier;
-      };
+      checks =
+        import ../../../tests {
+          inherit pkgs impurifier;
+          coreSrc = inputs.impurifier;
+        }
+        // {
+          bundled-vm =
+            (import ../../../tests {
+              inherit pkgs impurifier;
+              coreSrc = inputs.impurifier;
+              bundled = true;
+            }).native-vm;
+        };
     };
 }

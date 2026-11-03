@@ -3,8 +3,18 @@
   pkgs,
   impurifier,
   coreSrc,
+  bundled ? false,
 }:
 let
+  staticNix = import (coreSrc + "/tests/static-nix.nix") { inherit pkgs; };
+  bundleArgs = pkgs.lib.optionalAttrs bundled {
+    bundledNixStore = "${staticNix}/bin/nix-store";
+    bundledNixNotices = [ "${pkgs.nix.src}/COPYING" ];
+  };
+  builder = impurifier // {
+    makeNetDeployment = args: impurifier.makeNetDeployment (args // bundleArgs);
+    makeOfflineDeployment = args: impurifier.makeOfflineDeployment (args // bundleArgs);
+  };
   tools = impurifier.native;
   app = pkgs.writeShellScriptBin "tu-app" "echo transactional-one" // {
     pname = "tu-app";
@@ -14,13 +24,24 @@ let
     pname = "tu-app";
     version = "2";
   };
-  net = impurifier.makeNetDeployment { pkg = app; };
-  offline = impurifier.makeOfflineDeployment { pkg = app; };
-  upgrade = impurifier.makeOfflineDeployment { pkg = app2; };
+  net = builder.makeNetDeployment { pkg = app; };
+  offline = builder.makeOfflineDeployment { pkg = app; };
+  upgrade = builder.makeOfflineDeployment { pkg = app2; };
   fixture = import (coreSrc + "/tests/hardware-fixture.nix") { inherit pkgs; };
-  hardware = impurifier.makeOfflineDeployment {
+  hardware = builder.makeOfflineDeployment {
     pkg = fixture.tool;
     hardware = fixture.hardware;
+  };
+  nativeTree = impurifier.makeNativeDeployment {
+    name = "native-proof";
+    payload =
+      pkgs.runCommand "native-transactional-proof" { nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ]; }
+        ''
+          mkdir -p $out/usr/bin
+          echo '#include <stdio.h>' > proof.c
+          echo 'int main(void) { puts("native-transactional"); return 0; }' >> proof.c
+          $CC -static proof.c -o $out/usr/bin/native-proof
+        '';
   };
   disk = pkgs.runCommand "tukit-empty-btrfs.raw" { nativeBuildInputs = [ pkgs.btrfs-progs ]; } ''
     truncate -s 4096M $out
@@ -29,7 +50,7 @@ let
 in
 {
   native-vm = pkgs.testers.runNixOSTest {
-    name = "transactional-update-native-contract";
+    name = "transactional-update-native-contract${pkgs.lib.optionalString bundled "-bundled"}";
     globalTimeout = 600;
     requiredFeatures = {
       kvm = false;
@@ -144,21 +165,32 @@ in
       machine.start()
       machine.wait_for_unit("multi-user.target", timeout=60)
       machine.succeed("${tools}/usr/sbin/tukit snapshots")
-      machine.succeed("${tools}/usr/sbin/transactional-update --no-selfupdate run ${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/mkdir -p /usr/share; echo staged > /usr/share/tukit-native-marker'")
+      machine.succeed("${tools}/usr/sbin/transactional-update --no-selfupdate run ${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/mkdir -p /usr/share; echo staged > /usr/share/tukit-native-marker; ${pkgs.coreutils}/bin/cp -r ${nativeTree}/rootfs/. /'")
       machine.succeed("test ! -e /usr/share/tukit-native-marker")
+      machine.succeed("test ! -e /usr/bin/native-proof")
       machine.fail("${tools}/usr/sbin/tukit execute ${pkgs.bash}/bin/bash -c 'exit 23'")
       machine.shutdown()
       machine.start()
       machine.wait_for_unit("multi-user.target", timeout=60)
       assert machine.succeed("cat /usr/share/tukit-native-marker").strip() == "staged"
+      assert machine.succeed("/usr/bin/native-proof").strip() == "native-transactional"
+      machine.succeed("mkdir -p /var/lib/native-proof/usr/bin; cp /usr/bin/native-proof /var/lib/native-proof/usr/bin/native-proof")
+      assert machine.succeed("chroot /var/lib/native-proof /usr/bin/native-proof").strip() == "native-transactional"
+      machine.succeed("test ! -e /var/lib/native-proof/nix; test ! -e /usr/share/transactional-update-impurifier/apps")
       machine.succeed("${tools}/usr/sbin/tukit rollback " + base)
       machine.shutdown()
       machine.start()
       machine.wait_for_unit("multi-user.target", timeout=60)
       machine.succeed("test ! -e /usr/share/tukit-native-marker")
+      machine.succeed("test ! -e /usr/bin/native-proof")
 
+      ${pkgs.lib.optionalString bundled ''
+        machine.succeed("mkdir -p /home/consumer/no-nix; printf '#!${pkgs.runtimeShell}\\necho incompatible-client\\n' > /home/consumer/no-nix/nix-store; chmod 755 /home/consumer/no-nix/nix-store")
+      ''}
       def user(command):
-          return "su - consumer -c " + shlex.quote(command)
+          return "su - consumer -c " + shlex.quote(("PATH=/home/consumer/no-nix:$PATH " if ${
+            if bundled then "True" else "False"
+          } else "") + command)
       def default_snapshot():
           rows = csv.DictReader(machine.succeed("snapper --csvout list --columns number,default").splitlines())
           return next(row['number'] for row in rows if row['default'] == 'yes')

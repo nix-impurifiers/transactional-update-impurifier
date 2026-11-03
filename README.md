@@ -63,5 +63,30 @@ It does not emulate Snapper metadata or replace Tukit's transaction engine.
 The SDK uses upstream libeconf 0.8.6 for its required quote-handling API. Private
 ELF search paths locate the SDK libraries. Native deployment currently covers
 x86_64 Linux application commands with a writable Btrfs root; read-only-root
-variants, services/accounts, arbitrary payload trees, concurrent administration,
+variants, services/accounts, arbitrary payload transaction policies, concurrent administration,
 SUSE package upgrades and other architectures need separate coverage.
+
+## Native payloads and bundled clients
+
+`makeNativeDeployment { name; payload; }` produces `rootfs/` from a complete
+prepared filesystem tree without an SDK, engine, Nix dependencies or activation
+hooks. Apply its files using native `transactional-update run` or `tukit execute`,
+for example by copying `rootfs/.` to `/` inside the transaction. The native
+tool owns snapshot activation and rollback. This artifact is not input to the
+Nix-backed `transactional-update-impurifier install` helper, which retains its
+Nix requirement. No per-file uninstall inventory or automatic relocation is
+added; native snapshot rollback removes the applied tree.
+
+The VM stages and boots a static proof through the native transaction, executes
+it in a separate root without `/nix`, and rolls back to its absence. The manager
+fixture retains its documented NixOS host tools and persistent Nix store.
+
+Nix-backed application constructors also accept `bundledNixStore` (a supplied
+static ELF executable) and `bundledNixNotices` (upstream notice files). The
+application carries the client privately and uses a Python-only SDK. Launch
+prefers a compatible external client, then the bundle, before registering roots
+or capturing hardware. Explicit `IMPURIFIER_NIX_STORE` disables fallback.
+Trusted preparation still uses host tools and never executes the image-owned
+client as root. An existing store, daemon and initial SDK preparation remain
+required. The separate bundled VM repeats the native lifecycle with an
+incompatible external candidate; this is not a Nix installer.
