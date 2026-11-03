@@ -51,7 +51,8 @@ in
 {
   native-vm = pkgs.testers.runNixOSTest {
     name = "transactional-update-native-contract${pkgs.lib.optionalString bundled "-bundled"}";
-    globalTimeout = 600;
+    # Multiple real reboots run under TCG alongside cold SDK builds in CI.
+    globalTimeout = 1200;
     requiredFeatures = {
       kvm = false;
       devnet = false;
